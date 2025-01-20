@@ -36,6 +36,7 @@ import numpy as np
 from collections import deque
 from struct import pack, unpack
 import pyproj
+
 try:
     from osgeo import gdal
     from osgeo.gdalconst import *
@@ -52,30 +53,31 @@ gdal.TermProgress = gdal.TermProgress_nocb
 
 swap_GeoTransform = True
 
-
-## parser
-ap = argparse.ArgumentParser(\
-    description="Convert a GDAL raster (like a GeoTIFF heightmap)"\
-    +" to an STL terrain surface.")
-ap.add_argument('-v', '--verbose', action='store_true', default=False,\
-    help="Print log messages")
-ap.add_argument('--band', action='store', default=1, type=int,\
-    help="Raster data band, defaults to 1")
-ap.add_argument('RASTER', help="Input GeoTIFF image")
-ap.add_argument('STL', help="Output STL path")
-args = ap.parse_args()
+def Parse():
+    ## parser
+    ap = argparse.ArgumentParser(\
+        description="Convert a GDAL raster (like a GeoTIFF heightmap)"\
+        +" to an stl terrain surface.")
+    ap.add_argument('-v', '--verbose', action='store_true', default=False,\
+        help="Print log messages")
+    ap.add_argument('--band', action='store', default=1, type=int,\
+        help="Raster data band, defaults to 1")
+    ap.add_argument('--raster', help="Input GeoTIFF image")
+    ap.add_argument('--stl', help="Output stl path")
+    args = ap.parse_args().__dict__
+    return args
 
 
 def fail(msg):
-    print >> sys.stderr, msg
+    print(sys.stderr, msg)
     exit(1)
 
-def verbose(msg):
-    if args.verbose:
-        print >> sys.stderr, msg
+def verbose(msg,verbose=True):
+    if verbose:
+        print(sys.stderr, msg)
     return
 
-def ComputeUTMProj4defs (lon, lat):
+def ComputeUTMProj4defs(lon, lat):
     """
     Estimate UTM Zone and exports definitions for Proj4 input.
     Equations from USGS Bulletin 1532. Coordinates in decimal degrees.
@@ -132,7 +134,7 @@ def NormalVector(t):
 
 class stlwriter():
     """
-    stlwriter is a simple class for writing binary STL meshes.
+    stlwriter is a simple class for writing binary stl meshes.
     Class instances are constructed with a predicted face count.
     The output file header is overwritten upon completion with
     the actual face count.
@@ -144,7 +146,7 @@ class stlwriter():
         # track number of facets actually written
         self.written = 0
         # write binary stl header with predicted facet count
-        self.f.write('\0' * 80)
+        self.f.write(('\0' * 80).encode())
         # (facet count is little endian 4 byte unsigned int)
         self.f.write(pack('<I', facet_count))
         return
@@ -158,7 +160,7 @@ class stlwriter():
         for vertex in t:
             self.f.write(pack('<3f', *vertex))
         # facet records conclude with two null bytes (unused "attributes")
-        self.f.write('\0\0')
+        self.f.write('\0\0'.encode())
         self.written += 1
         return
     #
@@ -176,189 +178,218 @@ class stlwriter():
         self.done()
         return
 
+# class SpatialReference(osr.SpatialReference):
+#     def __init__(self, *args, **kwargs):
+#         super(SpatialReference, self).__init__(*args, **kwargs)
+#         self._angular_transform = None
+
+#     @classmethod
+#     def FromEPSG(cls, code):
+#         s = cls()
+#         s.ImportFromEPSG(code) #<--------int error here
+#         return s
+
+def dem2stl(raster, stl, band=1, **kwargs):
+    """
+    Convert a GDAL raster (like a GeoTIFF heightmap) to an stl terrain surface.
+    """
+    verbose(f"converting {raster} to {stl}")
+
+    ## open dataset
+    try:
+        ds = gdal.Open(raster)
+    except RuntimeError as e:
+        fail(str(e).strip())
+
+    ## dataset coordinate system
+    OSRds = osr.SpatialReference(ds.GetProjection())
+    OSRds.ImportFromWkt(ds.GetProjection())    # ds.GetProjection() in Wkt
+    P4ds = pyproj.Proj(OSRds.ExportToProj4())  # get projection in Proj4
+    EPSGds = None
+    if 0 == OSRds.AutoIdentifyEPSG():
+        EPSGds = OSRds.GetAuthorityCode(None)  # guess EPSG code
+
+    ## raster dimensions
+    nx, ny = ds.RasterXSize, ds.RasterYSize
+    nxm1, nym1 = nx - 1, ny - 1
+    verbose(f"raster size {nx}x{ny} pixels")
+
+    ## geo transforms
+    GT = ds.GetGeoTransform()
+    # i, j = nx/3, ny*2/3
+    # x, y = gdal.ApplyGeoTransform(GT, i+.5, j+.5)
+    ## using arrays instead...
+    ## i = np.arange(nx) ; j = np.arange(ny) ;
+    # x = GT[0] + GT[1] * (i[None,:] + .5) + GT[2] * (j[:,None] + .5)
+    # y = GT[3] + GT[4] * (i[None,:] + .5) + GT[5] * (j[:,None] + .5)
+    IGT = gdal.InvGeoTransform(GT)[1]
+    # i, j = np.round(np.array(gdal.ApplyGeoTransform(IGT, x, y)) - .5).astype(int)
+    ## using arrays instead...
+    # i = np.round(IGT[0] + IGT[1] * x[:] + IGT[2] * y[:] - .5).astype(int)
+    # j = np.round(IGT[3] + IGT[4] * x[:] + IGT[5] * y[:] - .5).astype(int)
+
+    ## get UTM projected coordinates
+    if 1 == OSRds.IsProjected():
+        # i = np.arange(nx)
+        # j = np.arange(ny)
+        i = np.array([0, nxm1])
+        j = np.array([0, nym1])
+        x = GT[0] + GT[1] * (i[None,:] + .5) + GT[2] * (j[:,None] + .5)
+        y = GT[3] + GT[4] * (i[None,:] + .5) + GT[5] * (j[:,None] + .5)
+        P4xy = P4ds
+        OSRxy = OSRds
+        EPSGxy = EPSGds
+        print(f"Projected CS,  EPSG:{EPSGxy}")
+    elif 1 == OSRds.IsGeographic():
+        print(f"Geographic CS, EPSG:{EPSGds}")
+        # i = np.arange(nx)
+        # j = np.arange(ny) 
+        i = np.array([0, nxm1])
+        j = np.array([0, nym1])
+        lon = GT[0] + GT[1] * (i[None,:] + .5) + GT[2] * (j[:,None] + .5)
+        lat = GT[3] + GT[4] * (i[None,:] + .5) + GT[5] * (j[:,None] + .5)
+        ## compute UTM zone from centre lon lat
+        lonc, latc = gdal.ApplyGeoTransform(GT, nx/2., ny/2.)
+        P4xy = ComputeUTMProj4defs(lonc, latc)
+        OSRxy = osr.SpatialReference()
+        # OSRxy.ImportFromProj4(P4xy.srs)
+        OSRxy.ImportFromWkt(P4xy.crs.to_wkt())
+        EPSGxy = None
+        # proj = osr.SpatialReference(wkt=gdal_data.GetProjection())
+        # proj.AutoIdentifyEPSG()
+        if 0 == OSRxy.AutoIdentifyEPSG():
+            EPSGxy = OSRxy.GetAuthorityCode(None)  # guess EPSG code
+        
+        transformer = pyproj.Transformer.from_crs(P4ds.crs, P4xy.crs)
+        x, y = transformer.transform(lon, lat)
+        # x, y = pyproj.transform(P4ds, P4xy, lon, lat)
+        print(f"Projected CS,  EPSG:{EPSGxy}")
+    else:
+        print(f"??  Error, cannot determine Coordinate Reference System")
+        print(f"??  Wkt string: {ds.GetProjection()}")
+        print(f"??  Proj4 definitions: {P4ds.srs}")
+        print(f"??  EPSG:{EPSGds}")
+        fail("Aborting")
+
+    verbose(f"xmin, xmax = {np.min(x)} m, {np.max(x)} m")
+    verbose(f"ymin, ymax = {np.min(y)} m, {np.max(y)} m")
 
 
-## open dataset
-try:
-    ds = gdal.Open(args.RASTER)
-except RuntimeError, e:
-    fail(str(e).strip())
+    verbose(f"Working on band {band}")
+    band = ds.GetRasterBand(band)
+    nd = band.GetNoDataValue()
 
-## dataset coordinate system
-OSRds = osr.SpatialReference()
-OSRds.ImportFromWkt(ds.GetProjection())    # ds.GetProjection() in Wkt
-P4ds = pyproj.Proj(OSRds.ExportToProj4())  # get projection in Proj4
-EPSGds = None
-if 0 == OSRds.AutoIdentifyEPSG():
-    EPSGds = OSRds.GetAuthorityCode(None)  # guess EPSG code
+    ## map GDAL pixel data type to corresponding struct format character
+    typemap = { \
+        gdal.GDT_Byte:    'B',\
+        gdal.GDT_UInt16:  'H',\
+        gdal.GDT_Int16:   'h',\
+        gdal.GDT_UInt32:  'I',\
+        gdal.GDT_Int32:   'i',\
+        gdal.GDT_Float32: 'f',\
+        gdal.GDT_Float64: 'd'}
 
+    typeName = gdal.GetDataTypeName(band.DataType)
+    if band.DataType not in typemap:
+        fail(f"Unsupported data type: {typeName}")
 
-## raster dimensions
-nx, ny = ds.RasterXSize, ds.RasterYSize
-nxm1, nym1 = nx - 1, ny - 1
-verbose("raster size %dx%d pixels" % (nx, ny))
+    ## rowformat is used to unpack a row of raw image data to numeric form
+    rowformat = typemap.get(band.DataType) * nx
+    verbose(f"data type   = {typeName}")
+    verbose(f"type format = {typemap.get(band.DataType)}")
 
-## geo transforms
-GT = ds.GetGeoTransform()
-# i, j = nx/3, ny*2/3
-# x, y = gdal.ApplyGeoTransform(GT, i+.5, j+.5)
-## using arrays instead...
-## i = np.arange(nx) ; j = np.arange(ny) ;
-# x = GT[0] + GT[1] * (i[None,:] + .5) + GT[2] * (j[:,None] + .5)
-# y = GT[3] + GT[4] * (i[None,:] + .5) + GT[5] * (j[:,None] + .5)
-IGT = gdal.InvGeoTransform(GT)[1]
-# i, j = np.round(np.array(gdal.ApplyGeoTransform(IGT, x, y)) - .5).astype(int)
-## using arrays instead...
-# i = np.round(IGT[0] + IGT[1] * x[:] + IGT[2] * y[:] - .5).astype(int)
-# j = np.round(IGT[3] + IGT[4] * x[:] + IGT[5] * y[:] - .5).astype(int)
-
-## get UTM projected coordinates
-if 1 == OSRds.IsProjected():
-    # i = np.arange(nx)
-    # j = np.arange(ny)
-    i = np.array([0, nxm1])
-    j = np.array([0, nym1])
-    x = GT[0] + GT[1] * (i[None,:] + .5) + GT[2] * (j[:,None] + .5)
-    y = GT[3] + GT[4] * (i[None,:] + .5) + GT[5] * (j[:,None] + .5)
-    P4xy = P4ds
-    OSRxy = OSRds
-    EPSGxy = EPSGds
-    print "Projected CS,  EPSG:%s" % EPSGxy
-elif 1 == OSRds.IsGeographic():
-    print "Geographic CS, EPSG:%s" % EPSGds
-    # i = np.arange(nx)
-    # j = np.arange(ny) 
-    i = np.array([0, nxm1])
-    j = np.array([0, nym1])
-    lon = GT[0] + GT[1] * (i[None,:] + .5) + GT[2] * (j[:,None] + .5)
-    lat = GT[3] + GT[4] * (i[None,:] + .5) + GT[5] * (j[:,None] + .5)
-    ## compute UTM zone from centre lon lat
-    lonc, latc = gdal.ApplyGeoTransform(GT, nx/2., ny/2.)
-    P4xy = ComputeUTMProj4defs (lonc, latc)
-    OSRxy = osr.SpatialReference()
-    OSRxy.ImportFromProj4(P4xy.srs)
-    EPSGxy = None
-    if 0 == OSRxy.AutoIdentifyEPSG():
-        EPSGxy = OSRxy.GetAuthorityCode(None)  # guess EPSG code
-    x, y = pyproj.transform(P4ds, P4xy, lon, lat)
-    print "Projected CS,  EPSG:%s" % EPSGxy
-else:
-    print "??  Error, cannot determine Coordinate Reference System"
-    print "??  Wkt string: " + ds.GetProjection()
-    print "??  Proj4 definitions: " + P4ds.srs
-    print "??  EPSG:%s" % EPSGds
-    fail("Aborting")
-
-verbose("xmin, xmax = %g m, %g m" % (np.min(x), np.max(x)))
-verbose("ymin, ymax = %g m, %g m" % (np.min(y), np.max(y)))
+    ## statistics on z field
+    zmin, zmax, zavg, zstd = band.GetStatistics(True, True)
+    verbose(f"min(z) = {zmin}")
+    verbose(f"max(z) = {zmax}")
+    verbose(f"avg(z) = {zavg}")
+    verbose(f"std(z) = {zstd}")
 
 
-verbose("Working on band %d" % args.band)
-band = ds.GetRasterBand(args.band)
-nd = band.GetNoDataValue()
+    ## rolling pixel buffer has space for two rows of image data
+    ## old data is automatically discarded as new data is loaded
+    pixels = deque(maxlen = (2 * nx))
+    verbose(f"buffer size = {str(pixels.maxlen)}")
 
-## map GDAL pixel data type to corresponding struct format character
-typemap = { \
-    gdal.GDT_Byte:    'B',\
-    gdal.GDT_UInt16:  'H',\
-    gdal.GDT_Int16:   'h',\
-    gdal.GDT_UInt32:  'I',\
-    gdal.GDT_Int32:   'i',\
-    gdal.GDT_Float32: 'f',\
-    gdal.GDT_Float64: 'd'}
+    ## initialize pixel buffer with first row of data from the image window
+    pixels.extend(unpack(rowformat, \
+        band.ReadRaster(0, 0, nx, 1, nx, 1, band.DataType)))
 
-typeName = gdal.GetDataTypeName(band.DataType)
-if band.DataType not in typemap:
-    fail("Unsupported data type: %s" % typeName)
+    ## precalculate output mesh size (stl is 50 bytes/facet + 84 byte header)
+    ## actual facet count and file size may differ (be less) if pixels are
+    ## skipped as nodata or out of range
+    facetcount = nxm1 * nym1 * 2
+    filesize = (facetcount * 50) + 84
+    verbose(f"predicted (max) facet count = {str(facetcount)}")
+    verbose(f"predicted (max) stl file size = {str(filesize)} bytes")
 
-## rowformat is used to unpack a row of raw image data to numeric form
-rowformat = typemap.get(band.DataType) * nx
-verbose("data type   = %s" % typeName)
-verbose("type format = %s" % typemap.get(band.DataType))
-
-## statistics on z field
-zmin, zmax, zavg, zstd = band.GetStatistics(True, True)
-verbose("min(z) = %g" % zmin)
-verbose("max(z) = %g" % zmax)
-verbose("avg(z) = %g" % zavg)
-verbose("std(z) = %g" % zstd)
-
-
-## rolling pixel buffer has space for two rows of image data
-## old data is automatically discarded as new data is loaded
-pixels = deque(maxlen = (2 * nx))
-verbose("buffer size = %s" % str(pixels.maxlen))
-
-## initialize pixel buffer with first row of data from the image window
-pixels.extend(unpack(rowformat, \
-    band.ReadRaster(0, 0, nx, 1, nx, 1, band.DataType)))
-
-## precalculate output mesh size (STL is 50 bytes/facet + 84 byte header)
-## actual facet count and file size may differ (be less) if pixels are
-## skipped as nodata or out of range
-facetcount = nxm1 * nym1 * 2
-filesize = (facetcount * 50) + 84
-verbose("predicted (max) facet count = %s" % str(facetcount))
-verbose("predicted (max) STL file size = %s bytes" % str(filesize))
-
-i0, j0 = 0, 0
-with stlwriter(args.STL, facetcount) as mesh:
-    for j in xrange(nym1):
-        ## each row, extend pixel buffer with the next row of data
-        ## from the image window
-        pixels.extend(unpack(rowformat, \
-            band.ReadRaster(i0, j0 + j + 1, nx, 1, nx, 1, band.DataType)))
-        for i in xrange(nxm1):
-            ## z values of this pixel (a) and its neighbors (b, c and d)
-            av = pixels[i]
-            bv = pixels[nx + i]
-            cv = pixels[i + 1]
-            dv = pixels[nx + i + 1]
-            ## apply transforms to obtain output mesh coordinates of the
-            ## four corners composed of raster points a (x, y), b, c,
-            ## and d (x + 1, y + 1):
-            ##
-            ## a-c   a-c     c
-            ## |/| = |/  +  /|
-            ## b-d   b     b-d
-            ##
-            ## points b and c are required for both facets, so if either
-            ## are not valid, we can skip this pixel altogether
-            if nd == bv or nd == cv:
-                ## point b or c invalid
-                continue
-            ## remember that we are looking for the vertexes, not the centres
-            b = [ \
-                GT[0] + (i0 + i) * GT[1] + (j0 + j + 1) * GT[2],\
-                GT[3] + (i0 + i) * GT[4] + (j0 + j + 1) * GT[5],\
-                float(bv) ]
-            c = [ \
-                GT[0] + (i0 + i + 1) * GT[1] + (j0 + j) * GT[2],\
-                GT[3] + (i0 + i + 1) * GT[4] + (j0 + j) * GT[5],\
-                float(cv) ]
-            if 1 == OSRds.IsGeographic():
-                b[0], b[1] = pyproj.transform(P4ds, P4xy, b[0], b[1])
-                c[0], c[1] = pyproj.transform(P4ds, P4xy, c[0], c[1])
-            if nd != av:
-                ## point a is valid
-                a = [ \
-                    GT[0] + (i0 + i) * GT[1] + (j0 + j) * GT[2],\
-                    GT[3] + (i0 + i) * GT[4] + (j0 + j) * GT[5],\
-                    float(av) ]
+    i0, j0 = 0, 0
+    with stlwriter(stl, facetcount) as mesh:
+        for j in range(nym1):
+            ## each row, extend pixel buffer with the next row of data
+            ## from the image window
+            pixels.extend(unpack(rowformat, \
+                band.ReadRaster(i0, j0 + j + 1, nx, 1, nx, 1, band.DataType)))
+            for i in range(nxm1):
+                ## z values of this pixel (a) and its neighbors (b, c and d)
+                av = pixels[i]
+                bv = pixels[nx + i]
+                cv = pixels[i + 1]
+                dv = pixels[nx + i + 1]
+                ## apply transforms to obtain output mesh coordinates of the
+                ## four corners composed of raster points a (x, y), b, c,
+                ## and d (x + 1, y + 1):
+                ##
+                ## a-c   a-c     c
+                ## |/| = |/  +  /|
+                ## b-d   b     b-d
+                ##
+                ## points b and c are required for both facets, so if either
+                ## are not valid, we can skip this pixel altogether
+                if nd == bv or nd == cv:
+                    ## point b or c invalid
+                    continue
+                ## remember that we are looking for the vertexes, not the centres
+                b = [ \
+                    GT[0] + (i0 + i) * GT[1] + (j0 + j + 1) * GT[2],\
+                    GT[3] + (i0 + i) * GT[4] + (j0 + j + 1) * GT[5],\
+                    float(bv) ]
+                c = [ \
+                    GT[0] + (i0 + i + 1) * GT[1] + (j0 + j) * GT[2],\
+                    GT[3] + (i0 + i + 1) * GT[4] + (j0 + j) * GT[5],\
+                    float(cv) ]
+                transformer = pyproj.Transformer.from_crs(P4ds.crs, P4xy.crs)
                 if 1 == OSRds.IsGeographic():
-                    a[0], a[1] = pyproj.transform(P4ds, P4xy, a[0], a[1])
-                mesh.add_facet((a, b, c))
-            if nd != dv:
-                ## point d is valid
-                d = [ \
-                    GT[0] + (i0 + i + 1) * GT[1] + (j0 + j + 1) * GT[2],\
-                    GT[3] + (i0 + i + 1) * GT[4] + (j0 + j + 1) * GT[5],\
-                    float(dv) ]
-                if 1 == OSRds.IsGeographic():
-                    d[0], d[1] = pyproj.transform(P4ds, P4xy, d[0], d[1])
-                mesh.add_facet((d, c, b))
-        ## update progress each row
-        gdal.TermProgress(float(j + 1) / nym1)
+                    b[0], b[1] = transformer.transform(b[0], b[1])
+                    c[0], c[1] = transformer.transform(c[0], c[1])
+                    # b[0], b[1] = pyproj.transform(P4ds, P4xy, b[0], b[1])
+                    # c[0], c[1] = pyproj.transform(P4ds, P4xy, c[0], c[1])
+                if nd != av:
+                    ## point a is valid
+                    a = [ \
+                        GT[0] + (i0 + i) * GT[1] + (j0 + j) * GT[2],\
+                        GT[3] + (i0 + i) * GT[4] + (j0 + j) * GT[5],\
+                        float(av) ]
+                    if 1 == OSRds.IsGeographic():
+                        a[0], a[1] = transformer.transform(a[0], a[1])
+                        # a[0], a[1] = pyproj.transform(P4ds, P4xy, a[0], a[1])
+                    mesh.add_facet((a, b, c))
+                if nd != dv:
+                    ## point d is valid
+                    d = [ \
+                        GT[0] + (i0 + i + 1) * GT[1] + (j0 + j + 1) * GT[2],\
+                        GT[3] + (i0 + i + 1) * GT[4] + (j0 + j + 1) * GT[5],\
+                        float(dv) ]
+                    if 1 == OSRds.IsGeographic():
+                        d[0], d[1] = transformer.transform(d[0], d[1])
+                        # d[0], d[1] = pyproj.transform(P4ds, P4xy, d[0], d[1])
+                    mesh.add_facet((d, c, b))
+            ## update progress each row
+            gdal.TermProgress(float(j + 1) / nym1)
 
-verbose("actual facet count: %s" % str(mesh.written))
+    verbose(f"actual facet count: {str(mesh.written)}")
+    return mesh
 
+if __name__ == '__main__':
+    kwargs = Parse()
+    mesh = dem2stl(**kwargs)
