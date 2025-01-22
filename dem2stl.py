@@ -78,26 +78,28 @@ def verbose(msg,verbose=True):
     return
 
 def ComputeUTMProj4defs(lon, lat):
+    import utm
     """
     Estimate UTM Zone and exports definitions for Proj4 input.
     Equations from USGS Bulletin 1532. Coordinates in decimal degrees.
     Based from:  http://robotics.ai.uiuc.edu/~hyoon24/LatLongUTMconversion.py
     """
-    # Make sure the longitude is between -180.0 and 179.9
-    lon = (lon + 180) - int((lon + 180) / 360) * 360 - 180
-    Zone = int((lon + 180.)/6.) + 1 
-    if lat >= 56 and lat < 64 and lon >= 3 and lon < 12:
-        Zone = 32
-    # Special zones for Svalbard
-    if lat >= 72 and lat < 84:
-        if  lon >= 0  and lon < 9:
-            Zone = 31
-        elif lon >= 9 and lon < 21:
-            Zone = 33
-        elif lon >= 21 and lon < 33:
-            Zone = 35
-        elif lon >= 33 and lon < 42:
-            Zone = 37
+    # # Make sure the longitude is between -180.0 and 179.9
+    # lon = (lon + 180) - int((lon + 180) / 360) * 360 - 180
+    # Zone = int((lon + 180.)/6.) + 1 
+    # if lat >= 56 and lat < 64 and lon >= 3 and lon < 12:
+    #     Zone = 32
+    # # Special zones for Svalbard
+    # if lat >= 72 and lat < 84:
+    #     if  lon >= 0  and lon < 9:
+    #         Zone = 31
+    #     elif lon >= 9 and lon < 21:
+    #         Zone = 33
+    #     elif lon >= 21 and lon < 33:
+    #         Zone = 35
+    #     elif lon >= 33 and lon < 42:
+    #         Zone = 37
+    _,_,Zone,_ = utm.from_latlon(lat, lon)
     Proj4def = "+proj=utm +ellps=WGS84 +zone=%d" % Zone
     if lat < 0:
         Proj4def += " +south"
@@ -188,6 +190,125 @@ class stlwriter():
 #         s = cls()
 #         s.ImportFromEPSG(code) #<--------int error here
 #         return s
+
+def write_stl_file(stl,pixels,facetcount,
+                   nxm1,nym1,rowformat,band,
+                   nx,nd,GT):
+    i0, j0 = 0, 0
+    with stlwriter(stl, facetcount) as mesh:
+        for j in range(nym1):
+            ## each row, extend pixel buffer with the next row of data
+            ## from the image window
+            pixels.extend(unpack(rowformat, \
+                band.ReadRaster(i0, j0 + j + 1, nx, 1, nx, 1, band.DataType)))
+            for i in range(nxm1):
+                ## z values of this pixel (a) and its neighbors (b, c and d)
+                av = pixels[i]
+                bv = pixels[nx + i]
+                cv = pixels[i + 1]
+                dv = pixels[nx + i + 1]
+                ## apply transforms to obtain output mesh coordinates of the
+                ## four corners composed of raster points a (x, y), b, c,
+                ## and d (x + 1, y + 1):
+                ##
+                ## a-c   a-c     c
+                ## |/| = |/  +  /|
+                ## b-d   b     b-d
+                ##
+                ## points b and c are required for both facets, so if either
+                ## are not valid, we can skip this pixel altogether
+                if nd == bv or nd == cv:
+                    ## point b or c invalid
+                    continue
+                ## remember that we are looking for the vertexes, not the centres
+                b = [ \
+                    GT[0] + (i0 + i) * GT[1] + (j0 + j + 1) * GT[2],\
+                    GT[3] + (i0 + i) * GT[4] + (j0 + j + 1) * GT[5],\
+                    float(bv) ]
+                c = [ \
+                    GT[0] + (i0 + i + 1) * GT[1] + (j0 + j) * GT[2],\
+                    GT[3] + (i0 + i + 1) * GT[4] + (j0 + j) * GT[5],\
+                    float(cv) ]
+                # b[0], b[1] = transformer.transform(b[0], b[1])
+                # c[0], c[1] = transformer.transform(c[0], c[1])
+                if nd != av:
+                    ## point a is valid
+                    a = [ \
+                        GT[0] + (i0 + i) * GT[1] + (j0 + j) * GT[2],\
+                        GT[3] + (i0 + i) * GT[4] + (j0 + j) * GT[5],\
+                        float(av) ]
+                    # a[0], a[1] = transformer.transform(a[0], a[1])
+                    mesh.add_facet((a, b, c))
+                if nd != dv:
+                    ## point d is valid
+                    d = [ \
+                        GT[0] + (i0 + i + 1) * GT[1] + (j0 + j + 1) * GT[2],\
+                        GT[3] + (i0 + i + 1) * GT[4] + (j0 + j + 1) * GT[5],\
+                        float(dv) ]
+                    # d[0], d[1] = transformer.transform(d[0], d[1])
+                    mesh.add_facet((d, c, b))
+            ## update progress each row
+            gdal.TermProgress(float(j + 1) / nym1)
+    return mesh
+def write_stl_file_geographic(stl,pixels,facetcount,
+                              nxm1,nym1,rowformat,band,
+                              nx,nd,GT,transformer):
+    i0, j0 = 0, 0
+    with stlwriter(stl, facetcount) as mesh:
+        for j in range(nym1):
+            ## each row, extend pixel buffer with the next row of data
+            ## from the image window
+            pixels.extend(unpack(rowformat, \
+                band.ReadRaster(i0, j0 + j + 1, nx, 1, nx, 1, band.DataType)))
+            for i in range(nxm1):
+                ## z values of this pixel (a) and its neighbors (b, c and d)
+                av = pixels[i]
+                bv = pixels[nx + i]
+                cv = pixels[i + 1]
+                dv = pixels[nx + i + 1]
+                ## apply transforms to obtain output mesh coordinates of the
+                ## four corners composed of raster points a (x, y), b, c,
+                ## and d (x + 1, y + 1):
+                ##
+                ## a-c   a-c     c
+                ## |/| = |/  +  /|
+                ## b-d   b     b-d
+                ##
+                ## points b and c are required for both facets, so if either
+                ## are not valid, we can skip this pixel altogether
+                if nd == bv or nd == cv:
+                    ## point b or c invalid
+                    continue
+                ## remember that we are looking for the vertexes, not the centres
+                b = [ \
+                    GT[0] + (i0 + i) * GT[1] + (j0 + j + 1) * GT[2],\
+                    GT[3] + (i0 + i) * GT[4] + (j0 + j + 1) * GT[5],\
+                    float(bv) ]
+                c = [ \
+                    GT[0] + (i0 + i + 1) * GT[1] + (j0 + j) * GT[2],\
+                    GT[3] + (i0 + i + 1) * GT[4] + (j0 + j) * GT[5],\
+                    float(cv) ]
+                b[0], b[1] = transformer.transform(b[0], b[1])
+                c[0], c[1] = transformer.transform(c[0], c[1])
+                if nd != av:
+                    ## point a is valid
+                    a = [ \
+                        GT[0] + (i0 + i) * GT[1] + (j0 + j) * GT[2],\
+                        GT[3] + (i0 + i) * GT[4] + (j0 + j) * GT[5],\
+                        float(av) ]
+                    a[0], a[1] = transformer.transform(a[0], a[1])
+                    mesh.add_facet((a, b, c))
+                if nd != dv:
+                    ## point d is valid
+                    d = [ \
+                        GT[0] + (i0 + i + 1) * GT[1] + (j0 + j + 1) * GT[2],\
+                        GT[3] + (i0 + i + 1) * GT[4] + (j0 + j + 1) * GT[5],\
+                        float(dv) ]
+                    d[0], d[1] = transformer.transform(d[0], d[1])
+                    mesh.add_facet((d, c, b))
+            ## update progress each row
+            gdal.TermProgress(float(j + 1) / nym1)
+    return mesh
 
 def dem2stl(raster, stl, band=1, **kwargs):
     """
@@ -323,69 +444,80 @@ def dem2stl(raster, stl, band=1, **kwargs):
     verbose(f"predicted (max) facet count = {str(facetcount)}")
     verbose(f"predicted (max) stl file size = {str(filesize)} bytes")
 
-    i0, j0 = 0, 0
-    with stlwriter(stl, facetcount) as mesh:
-        for j in range(nym1):
-            ## each row, extend pixel buffer with the next row of data
-            ## from the image window
-            pixels.extend(unpack(rowformat, \
-                band.ReadRaster(i0, j0 + j + 1, nx, 1, nx, 1, band.DataType)))
-            for i in range(nxm1):
-                ## z values of this pixel (a) and its neighbors (b, c and d)
-                av = pixels[i]
-                bv = pixels[nx + i]
-                cv = pixels[i + 1]
-                dv = pixels[nx + i + 1]
-                ## apply transforms to obtain output mesh coordinates of the
-                ## four corners composed of raster points a (x, y), b, c,
-                ## and d (x + 1, y + 1):
-                ##
-                ## a-c   a-c     c
-                ## |/| = |/  +  /|
-                ## b-d   b     b-d
-                ##
-                ## points b and c are required for both facets, so if either
-                ## are not valid, we can skip this pixel altogether
-                if nd == bv or nd == cv:
-                    ## point b or c invalid
-                    continue
-                ## remember that we are looking for the vertexes, not the centres
-                b = [ \
-                    GT[0] + (i0 + i) * GT[1] + (j0 + j + 1) * GT[2],\
-                    GT[3] + (i0 + i) * GT[4] + (j0 + j + 1) * GT[5],\
-                    float(bv) ]
-                c = [ \
-                    GT[0] + (i0 + i + 1) * GT[1] + (j0 + j) * GT[2],\
-                    GT[3] + (i0 + i + 1) * GT[4] + (j0 + j) * GT[5],\
-                    float(cv) ]
-                transformer = pyproj.Transformer.from_crs(P4ds.crs, P4xy.crs)
-                if 1 == OSRds.IsGeographic():
-                    b[0], b[1] = transformer.transform(b[0], b[1])
-                    c[0], c[1] = transformer.transform(c[0], c[1])
-                    # b[0], b[1] = pyproj.transform(P4ds, P4xy, b[0], b[1])
-                    # c[0], c[1] = pyproj.transform(P4ds, P4xy, c[0], c[1])
-                if nd != av:
-                    ## point a is valid
-                    a = [ \
-                        GT[0] + (i0 + i) * GT[1] + (j0 + j) * GT[2],\
-                        GT[3] + (i0 + i) * GT[4] + (j0 + j) * GT[5],\
-                        float(av) ]
-                    if 1 == OSRds.IsGeographic():
-                        a[0], a[1] = transformer.transform(a[0], a[1])
-                        # a[0], a[1] = pyproj.transform(P4ds, P4xy, a[0], a[1])
-                    mesh.add_facet((a, b, c))
-                if nd != dv:
-                    ## point d is valid
-                    d = [ \
-                        GT[0] + (i0 + i + 1) * GT[1] + (j0 + j + 1) * GT[2],\
-                        GT[3] + (i0 + i + 1) * GT[4] + (j0 + j + 1) * GT[5],\
-                        float(dv) ]
-                    if 1 == OSRds.IsGeographic():
-                        d[0], d[1] = transformer.transform(d[0], d[1])
-                        # d[0], d[1] = pyproj.transform(P4ds, P4xy, d[0], d[1])
-                    mesh.add_facet((d, c, b))
-            ## update progress each row
-            gdal.TermProgress(float(j + 1) / nym1)
+    if 1 == OSRds.IsGeographic():
+        transformer = pyproj.Transformer.from_crs(P4ds.crs, P4xy.crs)
+        mesh=write_stl_file_geographic(stl,pixels,facetcount,
+                                  nxm1,nym1,rowformat,band,
+                                  nx,nd,GT,transformer)
+    else:
+        transformer = None
+        mesh=write_stl_file(stl,pixels,facetcount,
+                       nxm1,nym1,rowformat,band,
+                       nx,nd,GT)
+    
+    # i0, j0 = 0, 0
+    # with stlwriter(stl, facetcount) as mesh:
+    #     for j in range(nym1):
+    #         ## each row, extend pixel buffer with the next row of data
+    #         ## from the image window
+    #         pixels.extend(unpack(rowformat, \
+    #             band.ReadRaster(i0, j0 + j + 1, nx, 1, nx, 1, band.DataType)))
+    #         for i in range(nxm1):
+    #             ## z values of this pixel (a) and its neighbors (b, c and d)
+    #             av = pixels[i]
+    #             bv = pixels[nx + i]
+    #             cv = pixels[i + 1]
+    #             dv = pixels[nx + i + 1]
+    #             ## apply transforms to obtain output mesh coordinates of the
+    #             ## four corners composed of raster points a (x, y), b, c,
+    #             ## and d (x + 1, y + 1):
+    #             ##
+    #             ## a-c   a-c     c
+    #             ## |/| = |/  +  /|
+    #             ## b-d   b     b-d
+    #             ##
+    #             ## points b and c are required for both facets, so if either
+    #             ## are not valid, we can skip this pixel altogether
+    #             if nd == bv or nd == cv:
+    #                 ## point b or c invalid
+    #                 continue
+    #             ## remember that we are looking for the vertexes, not the centres
+    #             b = [ \
+    #                 GT[0] + (i0 + i) * GT[1] + (j0 + j + 1) * GT[2],\
+    #                 GT[3] + (i0 + i) * GT[4] + (j0 + j + 1) * GT[5],\
+    #                 float(bv) ]
+    #             c = [ \
+    #                 GT[0] + (i0 + i + 1) * GT[1] + (j0 + j) * GT[2],\
+    #                 GT[3] + (i0 + i + 1) * GT[4] + (j0 + j) * GT[5],\
+    #                 float(cv) ]
+    #             transformer = pyproj.Transformer.from_crs(P4ds.crs, P4xy.crs)
+    #             if 1 == OSRds.IsGeographic():
+    #                 b[0], b[1] = transformer.transform(b[0], b[1])
+    #                 c[0], c[1] = transformer.transform(c[0], c[1])
+    #                 # b[0], b[1] = pyproj.transform(P4ds, P4xy, b[0], b[1])
+    #                 # c[0], c[1] = pyproj.transform(P4ds, P4xy, c[0], c[1])
+    #             if nd != av:
+    #                 ## point a is valid
+    #                 a = [ \
+    #                     GT[0] + (i0 + i) * GT[1] + (j0 + j) * GT[2],\
+    #                     GT[3] + (i0 + i) * GT[4] + (j0 + j) * GT[5],\
+    #                     float(av) ]
+    #                 if 1 == OSRds.IsGeographic():
+    #                     a[0], a[1] = transformer.transform(a[0], a[1])
+    #                     # a[0], a[1] = pyproj.transform(P4ds, P4xy, a[0], a[1])
+    #                 mesh.add_facet((a, b, c))
+    #             if nd != dv:
+    #                 ## point d is valid
+    #                 d = [ \
+    #                     GT[0] + (i0 + i + 1) * GT[1] + (j0 + j + 1) * GT[2],\
+    #                     GT[3] + (i0 + i + 1) * GT[4] + (j0 + j + 1) * GT[5],\
+    #                     float(dv) ]
+    #                 if 1 == OSRds.IsGeographic():
+    #                     d[0], d[1] = transformer.transform(d[0], d[1])
+    #                     # d[0], d[1] = pyproj.transform(P4ds, P4xy, d[0], d[1])
+    #                 mesh.add_facet((d, c, b))
+    #         ## update progress each row
+    #         gdal.TermProgress(float(j + 1) / nym1)
 
     verbose(f"actual facet count: {str(mesh.written)}")
     return mesh
