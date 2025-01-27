@@ -7,7 +7,7 @@ RUN apt-get update && \
     apt-get install -y g++ python3-venv python3-dev python3-numpy gdal-bin libgdal-dev && apt-get clean && \
     python3 -m venv /dem2stl && . /dem2stl/bin/activate && \
     pip install gdal==`gdalinfo --version | awk  '{ print $2 }' | sed '$ s/.$//'` && \ 
-    pip install dem2stl*.whl && rm *.whl
+    pip install --find-links=. dem2stl && rm *.whl
 
 # example on how to test it:
 
