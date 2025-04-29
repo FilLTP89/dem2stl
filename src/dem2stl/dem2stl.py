@@ -36,6 +36,7 @@ import numpy as np
 from collections import deque
 from struct import pack, unpack
 import pyproj
+import utm
 
 try:
     from osgeo import gdal
@@ -78,7 +79,6 @@ def verbose(msg,verbose=True):
     return
 
 def ComputeUTMProj4defs(lon, lat):
-    import utm
     """
     Estimate UTM Zone and exports definitions for Proj4 input.
     Equations from USGS Bulletin 1532. Coordinates in decimal degrees.
@@ -522,6 +522,9 @@ def dem2stl(raster, stl, band=1, **kwargs):
     verbose(f"actual facet count: {str(mesh.written)}")
     return mesh
 
-if __name__ == '__main__':
+def main():
     kwargs = Parse()
     mesh = dem2stl(**kwargs)
+
+if __name__ == '__main__':
+    main()
