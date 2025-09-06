@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 # vim: set fileencoding=utf-8 fileformat=unix :
 # -*- coding: utf-8 -*-
 # vim: set ts=8 et sw=4 sts=4 sta :
@@ -84,7 +84,7 @@ def ComputeUTMProj4defs(lon, lat):
     Equations from USGS Bulletin 1532. Coordinates in decimal degrees.
     Based from:  http://robotics.ai.uiuc.edu/~hyoon24/LatLongUTMconversion.py
     """
-    # # Make sure the longitude is between -180.0 and 179.9
+    # Make sure the longitude is between -180.0 and 179.9
     # lon = (lon + 180) - int((lon + 180) / 360) * 360 - 180
     # Zone = int((lon + 180.)/6.) + 1 
     # if lat >= 56 and lat < 64 and lon >= 3 and lon < 12:
@@ -522,6 +522,10 @@ def dem2stl(raster, stl, band=1, **kwargs):
     verbose(f"actual facet count: {str(mesh.written)}")
     return mesh
 
-if __name__ == '__main__':
+
+def main():  
     kwargs = Parse()
-    mesh = dem2stl(**kwargs)
+    return dem2stl(**kwargs)
+    
+if __name__ == "__main__":  
+    mesh = main()
